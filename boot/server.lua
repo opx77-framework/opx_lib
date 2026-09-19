@@ -17,9 +17,11 @@
 -- One line in the journal, so an operator who added `opx_lib` to
 -- `resources.load` can see that it took.
 
--- Stated here because it cannot be read: the server sandbox has no .
---  holds this literal against init.lua and the manifest, because it
--- was already stale once and the only symptom was a wrong number in a journal.
+-- Stated as a literal because it cannot be read from anywhere: the dedicated
+-- server sandbox has no `require`. `tests/run.lua` holds this line against
+-- `init.lua` and the manifest, because it was already stale once -- 0.2.0 under
+-- a 0.3.0 library -- and the only symptom was a wrong number in a journal,
+-- which costs somebody an hour and never gets reported.
 local VERSION = '0.3.0'
 
 Open77.log.info(('opx_lib %s present. The library is client-side: the server '
