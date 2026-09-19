@@ -729,7 +729,51 @@ do
 end
 
 -- ── Marker ───────────────────────────────────────────────────────────────────
-section('marker')
+section('marker: the catalogue')
+do
+	check('the eight documented shapes are the ones the door accepts',
+		#Lib.Marker.SHAPES == 8 and Lib.Marker.SHAPES[1] == 'ring'
+		and Lib.Marker.SHAPES[8] == 'sphere')
+	check('and the four documented palettes',
+		#Lib.Marker.STYLES == 4 and Lib.Marker.STYLES[1] == 'interaction'
+		and Lib.Marker.STYLES[4] == 'danger')
+	check('the platform quotas are written down',
+		Lib.Marker.LIMIT == 64 and Lib.Marker.SLOTS == 256
+		and Lib.Marker.MAX_EXTENT == 200 and Lib.Marker.ALPHA == 180)
+
+	install({ ['markers.shapes'] = function() return { 'ring', 'sphere' } end })
+	local shapes = Lib.Marker.Shapes()
+	check('Shapes asks the build rather than answering the static list',
+		shapes.ok and #shapes.value == 2)
+	check('and sends nothing with it', lastCall().args.n == 0)
+
+	-- The asymmetry that matters: everything else in the namespace is gated on
+	-- world.markers and shapes() is gated on nothing, so a refusal from it must
+	-- NOT be rewritten into "add world.markers", which would fix nothing.
+	install({
+		['markers.shapes'] = function() return nil, 'permission_denied:world.markers' end,
+		['markers.create'] = function() return nil, 'permission_denied:world.markers' end,
+	})
+	local refused = Lib.Marker.Shapes()
+	check('a refusal from the ungated call is passed through unrewritten',
+		refused.error == 'permission_denied:world.markers'
+		and refused.detail:find('add permission', 1, true) == nil)
+	local gated = Lib.Marker.Place({ x = 0, y = 0, z = 0 })
+	check('while a gated one still names the manifest line to add',
+		gated.error == 'permission_denied'
+		and gated.detail:find('permission "world.markers"', 1, true) ~= nil)
+	check('and the module states that permission for Lib.Manifest()',
+		Lib.Marker.NEEDS == 'world.markers')
+	check('while recording which of its functions needs none',
+		Lib.Marker.UNGATED[1] == 'Shapes')
+
+	_G.Open77 = {}
+	check('on a build without the catalogue native, Shapes says so rather '
+		.. 'than answering a confident wrong list',
+		Lib.Marker.Shapes().error == 'native_not_found')
+end
+
+section('marker: the door')
 do
 	install({
 		['markers.create'] = function() return '18446744073709551615' end,
@@ -738,27 +782,252 @@ do
 		['markers.clear'] = function() return true end,
 	})
 
+	local function placed(options)
+		return Lib.Marker.Place({ x = 0, y = 0, z = 0 }, options)
+	end
+	local function sent() return lastCall().args[1] end
+
 	local made = Lib.Marker.Place({ x = 1.5, y = 2.5, z = 3.5 }, { radius = 1.5 })
 	check('Place answers the handle as the string it is',
 		made.ok and made.value == '18446744073709551615')
-	check('and forwards the options', lastCall().args[1].radius == 1.5)
+	check('and forwards the options', sent().radius == 1.5)
 	check('and rebuilds the position rather than passing the caller table',
-		lastCall().args[1].position.x == 1.5)
+		sent().position.x == 1.5)
 
 	Lib.Marker.Place({ x = 0, y = 0, z = 0 }, { position = { x = 99, y = 99, z = 99 } })
-	check('options cannot smuggle in a second position',
-		lastCall().args[1].position.x == 0)
+	check('options cannot smuggle in a second position', sent().position.x == 0)
 
 	local before = #recorded
 	check('a position that is not finite is refused',
 		Lib.Marker.Place({ x = 0 / 0, y = 0, z = 0 }).error == 'invalid_position')
-	check('a missing position is refused', Lib.Marker.Place(nil).error == 'invalid_position')
+	check('a missing position is refused by the platform\'s own word for it',
+		Lib.Marker.Place(nil).error == 'position_required')
 	check('and neither reached the platform', #recorded == before)
 
+	-- Shapes and styles: refused here, by name, and without a native call.
+	before = #recorded
+	local badShape = placed({ shape = 'sqaure' })
+	check('an unknown shape is refused with the platform\'s code',
+		badShape.error == 'unsupported_shape')
+	check('and the refusal lists the eight that would have worked',
+		badShape.detail:find('checkpoint', 1, true) ~= nil)
+	local badStyle = placed({ style = 'warning' })
+	check('an unknown style is refused with the platform\'s code',
+		badStyle.error == 'unknown_marker_style')
+	check('and neither reached the platform', #recorded == before)
+	check('every documented shape is accepted', (function()
+		for _, shape in ipairs(Lib.Marker.SHAPES) do
+			if not placed({ shape = shape }).ok then return false end
+		end
+		return true
+	end)())
+	check('every documented style is accepted', (function()
+		for _, style in ipairs(Lib.Marker.STYLES) do
+			if not placed({ style = style }).ok then return false end
+		end
+		return true
+	end)())
+
+	-- Each bound at both ends, from the documented options table.
+	check('radius holds at 0.1 and 50', placed({ radius = 0.1 }).ok
+		and placed({ radius = 50 }).ok)
+	check('and is refused just outside either end, by name',
+		placed({ radius = 0.09 }).error == 'invalid_radius'
+		and placed({ radius = 50.01 }).error == 'invalid_radius')
+	check('height holds at 0.01 and 100', placed({ height = 0.01 }).ok
+		and placed({ height = 100 }).ok)
+	check('and is refused just outside either end, by name',
+		placed({ height = 0.009 }).error == 'invalid_height'
+		and placed({ height = 100.01 }).error == 'invalid_height')
+	check('each scale axis holds at 0.01 and 100',
+		placed({ scale = { x = 0.01, y = 0.01, z = 0.01 } }).ok
+		and placed({ radius = 0.1, scale = { x = 100, y = 100, z = 100 } }).ok)
+	check('and each axis is refused just outside either end',
+		placed({ scale = { x = 0.009 } }).error == 'invalid_scale'
+		and placed({ scale = { y = 100.01 } }).error == 'invalid_scale'
+		and placed({ scale = { z = 0 } }).error == 'invalid_scale')
+	check('maxDistance holds at 1 and 500', placed({ maxDistance = 1 }).ok
+		and placed({ maxDistance = 500 }).ok)
+	check('and is refused just outside either end',
+		placed({ maxDistance = 0.99 }).error == 'invalid_distance'
+		and placed({ maxDistance = 500.01 }).error == 'invalid_distance')
+	check('minDistance holds at zero and is refused below it',
+		placed({ minDistance = 0 }).ok
+		and placed({ minDistance = -0.01 }).error == 'invalid_distance')
+
+	-- Cross-field, using the documented defaults for what a create omitted.
+	check('a minDistance at or past the default maxDistance is refused',
+		placed({ minDistance = 100 }).error == 'invalid_distance'
+		and placed({ minDistance = 99.9 }).ok)
+	check('and the pair is checked when both are given',
+		placed({ minDistance = 40, maxDistance = 30 }).error == 'invalid_distance'
+		and placed({ minDistance = 20, maxDistance = 30 }).ok)
+	check('a patch naming only one of the pair is left to the engine, which '
+		.. 'holds the stored other half',
+		Lib.Marker.Move('1', { minDistance = 400 }).ok)
+
+	local huge = placed({ radius = 50, scale = { x = 5 } })
+	check('an effective dimension over the 200 m cap is refused',
+		huge.error == 'invalid_scale' and huge.detail:find('200 m cap', 1, true) ~= nil)
+
+	-- Colour.
+	check('colour channels hold at 0 and 255',
+		placed({ color = { r = 0, g = 0, b = 0, a = 0 } }).ok
+		and placed({ color = { r = 255, g = 255, b = 255, a = 255 } }).ok)
+	check('and are refused just outside either end',
+		placed({ color = { r = -1, g = 0, b = 0 } }).error == 'invalid_color'
+		and placed({ color = { r = 0, g = 256, b = 0 } }).error == 'invalid_color'
+		and placed({ color = { r = 0, g = 0, b = 0, a = 256 } }).error == 'invalid_color')
+	placed({ color = { r = 1, g = 2, b = 3 } })
+	check('an omitted alpha is left to the engine rather than filled in here',
+		sent().color.a == nil)
+	placed({ color = '#ff3b47' })
+	check('a hex string is converted to the bytes the native wants',
+		sent().color.r == 255 and sent().color.g == 59 and sent().color.b == 71)
+	check('a malformed hex string is refused',
+		placed({ color = '#f00' }).error == 'invalid_color')
+	Lib.Marker.Move('1', { color = false })
+	check('color = false survives the door, because that is how a palette is '
+		.. 'restored', lastCall().args[2].color == false)
+
+	-- Everything else.
+	check('a rotation is accepted unwrapped, because the engine wraps it',
+		placed({ rotation = { z = 450 } }).ok)
+	check('but a rotation that is not finite is refused',
+		placed({ rotation = { z = 0 / 0 } }).error == 'invalid_rotation')
+	local typo = placed({ colour = { r = 1, g = 2, b = 3 } })
+	check('a misspelled field is named rather than silently ignored',
+		typo.error == 'unknown_field' and typo.detail:find('colour', 1, true) ~= nil)
+	check('visible must be a boolean',
+		placed({ visible = false }).ok and placed({ visible = 0 }).error == 'invalid_argument')
+
+	-- The quota.
+	install({ ['markers.create'] = function() return nil, 'quota_exceeded' end })
+	local full = Lib.Marker.Place({ x = 0, y = 0, z = 0 })
+	check('the quota refusal is rewritten to say what the numbers are',
+		full.error == 'quota_exceeded' and full.detail:find('64', 1, true) ~= nil
+		and full.detail:find('256', 1, true) ~= nil)
+end
+
+section('marker: the handle')
+do
+	install({
+		['markers.update'] = function() return true end,
+		['markers.remove'] = function() return true end,
+		['markers.clear'] = function() return true end,
+		['markers.get'] = function() return { id = '1', rendered = true } end,
+	})
+
+	local big = '18446744073709551615'
+	Lib.Marker.Remove(big)
+	check('a 64-bit handle reaches the platform as the exact string it was',
+		lastCall().args[1] == big and type(lastCall().args[1]) == 'string')
+	Lib.Marker.Move(big, { visible = true })
+	check('and so does the one a patch names', lastCall().args[1] == big)
+	Lib.Marker.Get(big)
+	check('and the one a read names', lastCall().args[1] == big)
+
+	local before = #recorded
+	check('a handle that was run through tonumber is refused at the door',
+		Lib.Marker.Remove(tonumber(big)).error == 'invalid_marker_id')
+	check('and so is one that is not a decimal string at all',
+		Lib.Marker.Remove('marker-1').error == 'invalid_marker_id'
+		and Lib.Marker.Get('').error == 'invalid_marker_id'
+		and Lib.Marker.Await(nil).error == 'invalid_marker_id')
+	check('and none of them reached the platform', #recorded == before)
+
 	check('Move patches', Lib.Marker.Move('1', { visible = false }).ok)
+	check('an empty patch is refused rather than spent on a native call',
+		Lib.Marker.Move('1', {}).error == 'invalid_argument')
 	check('Remove takes a handle', Lib.Marker.Remove('1').ok)
 	check('Clear takes nothing', Lib.Marker.Clear().ok)
-	check('the module states the permission it needs', Lib.Marker.NEEDS == 'world.markers')
+end
+
+section('marker: did it actually draw')
+do
+	-- The three snapshot fields the whole module is written around. `failed`
+	-- is tested before `visible` on purpose: a marker can be both.
+	check('a failed snapshot reads as failed even when it is visible',
+		Lib.Marker.State({ failed = true, visible = true, rendered = false }) == 'failed')
+	check('an invisible one that loaded reads as hidden',
+		Lib.Marker.State({ failed = false, visible = false, rendered = true }) == 'hidden')
+	check('an attached one reads as rendered',
+		Lib.Marker.State({ rendered = true, visible = true }) == 'rendered')
+	check('and anything else is pending, which honestly conflates streaming '
+		.. 'with distance culling',
+		Lib.Marker.State({ rendered = false, visible = true }) == 'pending')
+	check('a build whose snapshot carries no failed field cannot claim success',
+		Lib.Marker.State({ rendered = false }) == 'pending')
+	check('and something that is not a snapshot is not guessed at',
+		Lib.Marker.State(nil) == 'unknown' and Lib.Marker.State('1') == 'unknown')
+
+	local fleet = {
+		{ id = '1', rendered = true, visible = true },
+		{ id = '2', rendered = false, visible = true },
+		{ id = '3', rendered = false, visible = true, failed = true,
+			error = 'marker_assets_missing' },
+	}
+	install({ ['markers.list'] = function() return fleet end })
+
+	local all = Lib.Marker.List()
+	check('List annotates every snapshot with its state',
+		all.ok and all.value[1].state == 'rendered' and all.value[2].state == 'pending'
+		and all.value[3].state == 'failed')
+	check('and leaves the platform\'s own fields alone, so a newer build\'s '
+		.. 'extra ones survive', all.value[3].error == 'marker_assets_missing')
+	check('Count answers what the platform owns for this resource',
+		Lib.Marker.Count().value == 3)
+
+	local broken = Lib.Marker.Failures()
+	check('Failures separates "it never loaded" from "you cannot see it"',
+		broken.ok and #broken.value == 1 and broken.value[1].id == '3')
+
+	install({ ['markers.list'] = function() return {} end })
+	check('and an empty result is an answer, not a refusal',
+		Lib.Marker.Failures().ok and #Lib.Marker.Failures().value == 0)
+
+	-- Await: the point of the module. Runs in a thread because it suspends.
+	install({ ['markers.get'] = function() return { id = '7', rendered = true } end })
+	local drew = 'unset'
+	CreateThread(function() drew = Lib.Marker.Await('7') end)
+	check('Await resolves as soon as the mesh is attached',
+		drew ~= 'unset' and drew.ok and drew.value.state == 'rendered')
+
+	install({ ['markers.get'] = function()
+		return { id = '7', visible = false, rendered = false }
+	end })
+	CreateThread(function() drew = Lib.Marker.Await('7') end)
+	check('a marker the caller turned off resolves rather than waiting forever',
+		drew.ok and drew.value.state == 'hidden')
+
+	install({ ['markers.get'] = function()
+		return { id = '7', failed = true, error = 'marker_streaming_timeout' }
+	end })
+	CreateThread(function() drew = Lib.Marker.Await('7') end)
+	check('a marker that failed to load answers the reason it failed, so a '
+		.. 'handle never passes for a marker',
+		not drew.ok and drew.error == 'marker_streaming_timeout'
+		and drew.detail:find('failed to load', 1, true) ~= nil)
+
+	install({ ['markers.get'] = function() return { id = '7', failed = true } end })
+	CreateThread(function() drew = Lib.Marker.Await('7') end)
+	check('and a failure with no reason still fails rather than succeeding',
+		not drew.ok and drew.error == 'marker_load_failed')
+
+	install({ ['markers.get'] = function() return nil, 'not_found' end })
+	CreateThread(function() drew = Lib.Marker.Await('7') end)
+	check('a marker that is gone stops the wait instead of spending it',
+		not drew.ok and drew.error == 'not_found')
+
+	install({ ['markers.get'] = function()
+		return { id = '7', rendered = false, visible = true }
+	end })
+	drew = 'unset'
+	CreateThread(function() drew = Lib.Marker.Await('7', 200) end)
+	check('one that never draws is still pending when the wait starts', drew == 'unset')
+	step(); step(); step(); step()
+	check('and times out with the platform\'s own word for it',
+		drew ~= 'unset' and not drew.ok and drew.error == 'marker_streaming_timeout')
 end
 
 -- ── Callback ─────────────────────────────────────────────────────────────────

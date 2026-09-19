@@ -55,7 +55,7 @@ local Lib = {}
 --- Semantic: a new module or function is a minor, a changed answer is a major.
 --- A consumer pinning behaviour compares this and not the resource's manifest
 --- version, which an operator can edit.
-Lib.VERSION = '0.2.0'
+Lib.VERSION = '0.3.0'
 
 -- ── Pure: no natives, no permissions, no host ────────────────────────────────
 Lib.Result = require('@opx_lib/pure.result')
