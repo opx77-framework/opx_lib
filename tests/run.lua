@@ -1495,5 +1495,32 @@ do
 	check('timers need no permission', T.NEEDS == nil)
 end
 
+
+-- ── the version is stated in three places ───────────────────────────────────
+-- `boot/server.lua` CANNOT read it from anywhere: the dedicated-server sandbox
+-- has no `require`, so the one line it logs carries a literal. That literal was
+-- already stale once -- 0.2.0 against a 0.3.0 library -- and the only symptom
+-- would have been an operator reading the wrong version out of their journal
+-- while chasing something else.
+section('the version')
+do
+	local function grab(path, pattern)
+		local handle = io.open(path, 'r')
+		local body = handle and handle:read('a') or ''
+		if handle then handle:close() end
+		return body:match(pattern)
+	end
+
+	local entry = grab('init.lua', "Lib%.VERSION = '([%d%.]+)'")
+	local manifest = grab('open77.lua', '\nversion "([%d%.]+)"')
+	local boot = grab('boot/server.lua', "local VERSION = '([%d%.]+)'")
+
+	check('init.lua states one', entry ~= nil, tostring(entry))
+	check('and the manifest agrees', manifest == entry,
+		('manifest %s vs entry %s'):format(tostring(manifest), tostring(entry)))
+	check('and so does the line the server logs', boot == entry,
+		('boot %s vs entry %s'):format(tostring(boot), tostring(entry)))
+end
+
 print(('\n%d checks, %d failed'):format(checks, failures))
 os.exit(failures == 0 and 0 or 1)
