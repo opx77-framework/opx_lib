@@ -34,7 +34,7 @@
 -- an export; `modules/class.lua` explains what an export does to a metatable.
 
 resource "opx_lib"
-version "0.2.0"
+version "0.3.0"
 
 -- `>=0.0.1`, which is what every resource that has ever installed on this
 -- platform declares. A range carrying build metadata is accepted by the server
