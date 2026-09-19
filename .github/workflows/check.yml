@@ -1,0 +1,157 @@
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lua:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Lua 5.4
+        run: sudo apt-get update && sudo apt-get install -y lua5.4
+
+      # open77.lua is the manifest DSL, not Lua: `auto_start true` does not parse.
+      - name: Syntax
+        run: find . -name '*.lua' -not -name 'open77.lua' -exec luac5.4 -p {} +
+
+      - name: Tests
+        run: lua5.4 tests/run.lua
+
+      # A Lua file here is one of exactly two things, and the difference is the
+      # whole architecture of the resource:
+      #
+      #   DELIVERED (`files`)  the library. Sent to the client and executed in
+      #                        the CONSUMER's VM when they `require` it. On disk
+      #                        but not delivered means `module_not_found`, at
+      #                        runtime, inside somebody else's resource.
+      #   A SCRIPT             `boot/`. Runs in THIS resource's own VM, announces
+      #                        the library and nothing more. It exists because
+      #                        the server refuses a resource carrying no script
+      #                        at all -- see the manifest header.
+      #
+      # A file that is neither never runs and never ships.
+      - name: Every module is delivered or declared, every pattern matches
+        run: |
+          patterns=$(sed -n '/^files {/,/^}/p' open77.lua | grep -oE '"[^"]+"' | tr -d '"')
+          [ -n "$patterns" ] || { echo "the manifest delivers nothing"; exit 1; }
+
+          delivered=""
+          for pattern in $patterns; do
+            matched=""
+            for file in $pattern; do
+              [ -e "$file" ] && matched="$matched $file"
+            done
+            [ -n "$matched" ] || { echo "delivers a pattern that matches nothing: $pattern"; exit 1; }
+            delivered="$delivered$matched"
+          done
+
+          scripts=$(grep -oE '^\s*(shared|server|client)_script\s+"[^"]+"' open77.lua \
+                    | sed -E 's/.*"([^"]+)"/\1/')
+          # The server fails startup, rather than skipping the resource, when a
+          # resource declares none. Checked here so the outage happens in CI.
+          [ -n "$scripts" ] || { echo "the manifest declares no script: the server will refuse this"; exit 1; }
+          for file in $scripts; do
+            [ -f "$file" ] || { echo "declares a script that is not there: $file"; exit 1; }
+          done
+
+          known=$(printf '%s\n' $delivered $scripts | sort -u)
+
+          orphans=0
+          while read -r file; do
+            rel=${file#./}
+            case "$rel" in tests/*|open77.lua) continue ;; esac
+            printf '%s\n' "$known" | grep -qxF "$rel" \
+              || { echo "neither delivered nor declared, so it never runs: $rel"; orphans=1; }
+          done < <(find . -name '*.lua' -not -path './.git/*')
+          exit $orphans
+
+      # Inside a library, `require('pure.table')` resolves against the CONSUMER's
+      # resource, not this one. The short form therefore loads somebody else's
+      # file or nothing at all, and it fails only once the library is installed
+      # somewhere -- never here. Every import names us.
+      # Comments are stripped first, as below: the headers quote the wrong form
+      # in order to warn about it.
+      - name: Every import names the provider
+        run: |
+          stray=$(for file in init.lua pure/*.lua client/*.lua boot/*.lua; do
+            sed -E 's/--.*$//' "$file" \
+              | grep -nE "require\(" \
+              | grep -vE "require\('@opx_lib" \
+              | sed "s|^|$file:|"
+          done)
+          [ -z "$stray" ] || {
+            echo "$stray"
+            echo "an unqualified require searches the consumer's resource"
+            exit 1
+          }
+
+      # THE TWO-TIER RULE, and the directory is the classifier rather than a
+      # list here that would drift. `pure/` is the tier a SERVER resource can
+      # copy a file out of verbatim -- the dedicated-server sandbox has no
+      # `require`, so copying is the only way those helpers ever reach it. A
+      # pure module that quietly grew a `Wait` stops being copyable, and nobody
+      # notices until someone copies it.
+      - name: The pure tier reaches nothing
+        run: |
+          stray=$(for file in pure/*.lua; do
+            sed -E 's/--.*$//' "$file" \
+              | grep -nE '\b(_G|Open77|CreateThread|Wait|SetTimeout|ClearTimeout|GetResourceState)\b' \
+              | sed "s|^|$file:|"
+          done)
+          [ -z "$stray" ] || {
+            echo "$stray"
+            echo "a pure module may not touch the platform or the host;"
+            echo "if it must, it belongs in client/"
+            exit 1
+          }
+
+      # The other half of the same rule: copying a pure file out means copying
+      # what it imports too, so a pure module that imported a client one would
+      # drag the whole platform tier onto a server that cannot load any of it.
+      - name: The pure tier imports only the pure tier
+        run: |
+          stray=$(for file in pure/*.lua; do
+            sed -E 's/--.*$//' "$file" \
+              | grep -nE "require\('@opx_lib/client\." \
+              | sed "s|^|$file:|"
+          done)
+          [ -z "$stray" ] || {
+            echo "$stray"
+            echo "pure/ may not depend on client/; move the module or the helper"
+            exit 1
+          }
+
+      # Every client module goes through Native.Reach / Native.Call, which is
+      # what rewrites `permission_denied` into a refusal naming the manifest
+      # line. A module indexing the global table directly would skip that and
+      # hand the consumer the raw engine refusal from inside a library they
+      # cannot read. Naming Open77 inside an error STRING is fine and wanted, so
+      # the test is on `_G` -- the only way to reach the table at all.
+      - name: Only native.lua touches the global table
+        run: |
+          stray=$(for file in init.lua client/*.lua; do
+            case "$file" in client/native.lua) continue ;; esac
+            sed -E 's/--.*$//' "$file" | grep -nE '\b_G\b' | sed "s|^|$file:|"
+          done)
+          [ -z "$stray" ] || {
+            echo "$stray"
+            echo "reach the platform through Native.Reach / Native.Call"
+            exit 1
+          }
+
+      # Every client module states the permission a consumer must declare, even
+      # when the answer is "none" -- `NEEDS = nil` is a checked claim, a missing
+      # field is an oversight, and `Lib.Manifest()` is built by reading them.
+      - name: Every client module declares NEEDS
+        run: |
+          missing=0
+          for file in client/*.lua; do
+            case "$file" in client/native.lua) continue ;; esac
+            grep -q '^[A-Za-z]*\.NEEDS' "$file" \
+              || { echo "does not declare NEEDS: $file"; missing=1; }
+          done
+          exit $missing
