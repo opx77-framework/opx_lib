@@ -2384,5 +2384,45 @@ do
 		missing[1] == nil and missing[2] == 'open77_unavailable')
 end
 
+
+-- ── the client sandbox has no `getmetatable` ────────────────────────────────
+-- MEASURED, not assumed. The name-tag pass reported, from the live server:
+--   opx_lib/pure/validate.lua:126: attempt to call a nil value
+--   (global 'getmetatable')
+-- `Players.Nearby` validates its options with `Validate.Table`, the pass calls
+-- `Nearby`, so every pass raised and the scheduler job it ran in was unwound.
+-- The fitting room died the same way and worse: its retry loop runs inside a
+-- `CreateThread`, where a raise unwinds the coroutine and reports NOTHING, so a
+-- created character waited five minutes with an empty journal behind it.
+--
+-- The suite could not have caught it, and that is the part worth fixing. Desktop
+-- Lua has `getmetatable`, so every check passed while the shipped library was
+-- unusable on the platform it ships to. This section loads the real file into an
+-- environment WITHOUT the global -- the platform's environment -- and requires
+-- it to keep working. A bare call reintroduced anywhere in it raises here.
+section('validate survives a host with no getmetatable')
+do
+	local stripped = setmetatable({}, { __index = function(_, key)
+		if key == 'getmetatable' then return nil end
+		return _G[key]
+	end })
+
+	local chunk, why = loadfile('pure/validate.lua', 't', stripped)
+	check('the file loads against the platform environment', chunk ~= nil, tostring(why))
+
+	local V = chunk and chunk() or nil
+	check('and it returns the module', type(V) == 'table')
+
+	if type(V) == 'table' then
+		check('a plain table is still accepted', V.Table({ a = 1 }) ~= nil)
+		check('a non-table is still refused', V.Table('x') == nil)
+		check('the entry limit is still enforced', V.Table({ 1, 2, 3 }, 2) == nil)
+		check('and a table inside the limit still passes', V.Table({ 1, 2 }, 2) ~= nil)
+		-- The options table `Players.Nearby` validates, which is the exact call
+		-- that was raising in production.
+		check('the shape Players.Nearby validates is accepted',
+			V.Table({ includeSelf = true, limit = 32 }, 8) ~= nil)
+	end
+end
 print(('\n%d checks, %d failed'):format(checks, failures))
 os.exit(failures == 0 and 0 or 1)
