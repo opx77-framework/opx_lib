@@ -2341,5 +2341,48 @@ do
 		('boot %s vs entry %s'):format(tostring(boot), tostring(entry)))
 end
 
+
+-- ── the platform is read, not raw-read ──────────────────────────────────────
+-- This shipped as `rawget(_G, 'Open77')` and it was wrong twice: `rawget` skips
+-- a metatable, and `_G` is not necessarily the chunk's `_ENV`. A host that
+-- exposes the namespace through an `__index` accessor, or that hands a resource
+-- its own environment, made EVERY wrapper in this library answer
+-- `open77_unavailable` -- and a consumer's feature simply stopped, with no
+-- refusal anybody could see. It cost a live server its name tags.
+section('the platform namespace is reached the ordinary way')
+do
+	local N = Lib.Native
+
+	-- Nothing on _G itself; the namespace exists only behind a metatable, which
+	-- is exactly the arrangement `rawget` could not see.
+	local held = rawget(_G, 'Open77')
+	rawset(_G, 'Open77', nil)
+	local hadMeta = getmetatable(_G)
+	setmetatable(_G, { __index = function(_, key)
+		if key == 'Open77' then return { hud = { notify = function() return true end } } end
+		return nil
+	end })
+
+	local reached = N.Reach('hud.notify')
+	local answered = N.Call('hud.notify', nil, 'x')
+
+	setmetatable(_G, hadMeta)
+	rawset(_G, 'Open77', held)
+
+	check('a namespace behind a metatable is found', type(reached) == 'function',
+		tostring(reached))
+	check('and a call through it succeeds rather than refusing',
+		answered.ok == true, answered.error)
+
+	-- The other half: genuinely absent is still absent, and still never raises.
+	local kept = rawget(_G, 'Open77')
+	rawset(_G, 'Open77', nil)
+	local missing = { N.Reach('hud.notify') }
+	rawset(_G, 'Open77', kept)
+
+	check('and a platform that is really not there still answers nil',
+		missing[1] == nil and missing[2] == 'open77_unavailable')
+end
+
 print(('\n%d checks, %d failed'):format(checks, failures))
 os.exit(failures == 0 and 0 or 1)
