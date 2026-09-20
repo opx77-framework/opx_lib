@@ -22,7 +22,7 @@
 -- `init.lua` and the manifest, because it was already stale once -- 0.2.0 under
 -- a 0.3.0 library -- and the only symptom was a wrong number in a journal,
 -- which costs somebody an hour and never gets reported.
-local VERSION = '0.3.0'
+local VERSION = '0.4.0'
 
 Open77.log.info(('opx_lib %s present. The library is client-side: the server '
 	.. 'sandbox has no module loader, so nothing is published here.'):format(VERSION))

@@ -147,7 +147,8 @@ do
 	check('every client module is on the table',
 		Lib.Native and Lib.Timer and Lib.Character and Lib.Notify and Lib.Anim
 		and Lib.Input and Lib.Marker and Lib.Callback and Lib.Zone and Lib.Rpc
-		and Lib.Async and Lib.World and Lib.Players and Lib.Blip and Lib.Store and true)
+		and Lib.Async and Lib.World and Lib.Players and Lib.Blip and Lib.Store
+		and Lib.Camera and Lib.Screen and true)
 	check('it carries its own version', type(Lib.VERSION) == 'string')
 	check('loading it touched no native', next(recorded) == nil)
 end
@@ -590,8 +591,12 @@ do
 	check('a pure module contributes nothing to the manifest line',
 		Lib.NEEDS.Table == nil and Lib.NEEDS.Math == nil)
 	check('Manifest answers the whole line',
-		Lib.Manifest() == 'permissions { "input.actions", "network.events", '
-			.. '"ui.vanilla.hud", "ui.vanilla.map", "world.markers", "world.query" }')
+		Lib.Manifest() == 'permissions { "camera.script", "input.actions", '
+			.. '"network.events", "screen.effects", "ui.vanilla.hud", '
+			.. '"ui.vanilla.map", "world.markers", "world.query" }')
+	check('and a module added this release appears in it without anyone '
+		.. 'editing a list by hand',
+		Lib.NEEDS.Camera == 'camera.script' and Lib.NEEDS.Screen == 'screen.effects')
 end
 
 -- ── Notify ───────────────────────────────────────────────────────────────────
@@ -1439,6 +1444,820 @@ do
 		and settled.value[3].value == 'c')
 
 	check('async needs no permission', Lib.Async.NEEDS == nil)
+end
+
+-- ── Camera ───────────────────────────────────────────────────────────────────
+-- A promise the fake host hands back. `awaited` is what proves a blend was
+-- actually waited on rather than merely returned, which is the difference
+-- between "the view was released" and "the view is back".
+local function promise(...)
+	local held = table.pack(...)
+	local it = { awaited = false }
+	it.await = function(self)
+		local me = self or it
+		me.awaited = true
+		return table.unpack(held, 1, held.n)
+	end
+	return it
+end
+
+section('camera: what the platform said')
+do
+	local C = Lib.Camera
+
+	check('the four shake presets are the ones the door accepts',
+		#C.SHAKES == 4 and C.SHAKES[1] == 'hand' and C.SHAKES[4] == 'earthquake')
+	check('and the four phases a shot passes through',
+		#C.PHASES == 4 and C.PHASES[1] == 'idle' and C.PHASES[3] == 'holding')
+	check('the platform quotas and bounds are written down',
+		C.LIMIT == 16 and C.CLIENT_LIMIT == 64 and C.RANGE == 250
+		and C.MIN_FOV == 5 and C.MAX_FOV == 170 and C.MAX_BLEND == 60000
+		and C.MAX_AMPLITUDE == 4.0 and C.SHAKE_MS == 500)
+	check('and the follow offsets, in the target\'s own frame',
+		C.FOLLOW.distance[2] == 100 and C.FOLLOW.height[1] == -50
+		and C.FOLLOW.side[2] == 50)
+
+	-- The release rules, which are the reason the module exists.
+	local rules = 0
+	for _ in pairs(C.RELEASES) do rules = rules + 1 end
+	check('every documented release rule has a sentence', rules == 9
+		and C.RELEASES.resource_stopped ~= nil and C.RELEASES.player_died ~= nil
+		and C.RELEASES.camera_superseded ~= nil and C.RELEASES.world_exit ~= nil)
+	check('and the one that costs a caller their definitions says so',
+		C.RELEASES.resource_error:find('re-create', 1, true) ~= nil)
+	check('Why turns a token into that sentence',
+		C.Why('player_died') == C.RELEASES.player_died)
+	check('and passes a token it has never heard of through rather than '
+		.. 'inventing a meaning for it',
+		C.Why('some_newer_build_reason'):find('some_newer_build_reason', 1, true) ~= nil)
+
+	check('the module states its permission for Lib.Manifest()',
+		C.NEEDS == 'camera.script')
+	check('while recording which of its functions need none',
+		C.UNGATED[1] == 'Ray' and C.UNGATED[2] == 'Owner')
+
+	-- The same asymmetry marker has: a refusal from the ungated call must not
+	-- be rewritten into "add camera.script", which would fix nothing.
+	install({
+		['camera.unproject'] = function() return nil, 'permission_denied:camera.script' end,
+		['camera.create'] = function() return nil, 'permission_denied:camera.script' end,
+	})
+	local ray = C.Ray(0.5, 0.5)
+	check('a refusal from the ungated call is passed through unrewritten',
+		ray.error == 'permission_denied:camera.script'
+		and ray.detail:find('add permission', 1, true) == nil)
+	local gated = C.Create({ position = { x = 0, y = 0, z = 0 } })
+	check('while a gated one names the manifest line to add',
+		gated.error == 'permission_denied'
+		and gated.detail:find('permission "camera.script"', 1, true) ~= nil)
+
+	_G.Open77 = {}
+	check('on a build without the namespace, the module says so rather than '
+		.. 'raising inside a consumer\'s handler',
+		C.Create({ position = { x = 0, y = 0, z = 0 } }).error == 'native_not_found'
+		and C.Take(1).error == 'native_not_found'
+		and C.Release().error == 'native_not_found')
+end
+
+section('camera: the door')
+do
+	local C = Lib.Camera
+
+	install({
+		['camera.create'] = function() return 3 end,
+		['camera.setTransform'] = function() return true end,
+		['camera.lookAt'] = function() return true end,
+		['camera.attach'] = function() return true end,
+		['camera.detachFrom'] = function() return true end,
+		['camera.destroy'] = function() return true end,
+	})
+	local function made(spec) return C.Create(spec) end
+	local function sent() return lastCall().args[1] end
+
+	local cam = C.Create({ position = { x = 1.5, y = 2.5, z = 3.5 }, fov = 45 })
+	check('Create answers the id the platform gave', cam.ok and cam.value == 3)
+	check('and rebuilds the position rather than passing the caller\'s table',
+		sent().position.x == 1.5 and sent().fov == 45)
+
+	local before = #recorded
+	check('a camera with neither a position nor an attachTo is refused, '
+		.. 'because it has no pose at all',
+		made({ fov = 45 }).error == 'invalid_camera_position')
+	check('but an attachTo alone is a camera', made({ attachTo = 0 }).ok)
+	check('a position that is not finite is refused by the platform\'s word',
+		made({ position = { x = 0 / 0, y = 0, z = 0 } }).error == 'invalid_camera_position')
+	check('and the two refusals never reached the platform', #recorded == before + 1)
+
+	-- The field of view, at both ends, plus the documented escape hatch.
+	check('fov holds at 5 and 170', made({ position = { x = 0, y = 0, z = 0 }, fov = 5 }).ok
+		and made({ position = { x = 0, y = 0, z = 0 }, fov = 170 }).ok)
+	check('and is refused just outside either end, by name',
+		made({ position = { x = 0, y = 0, z = 0 }, fov = 4.99 }).error == 'invalid_camera_fov'
+		and made({ position = { x = 0, y = 0, z = 0 }, fov = 170.01 }).error == 'invalid_camera_fov')
+	C.Create({ position = { x = 0, y = 0, z = 0 }, fov = 0 })
+	check('zero is not five degrees: it means leave the engine\'s own alone, '
+		.. 'and it reaches the engine as zero', sent().fov == 0)
+	check('a fov that is not a number at all is refused',
+		made({ position = { x = 0, y = 0, z = 0 }, fov = '45' }).error == 'invalid_camera_fov')
+
+	-- lookAt is the one field where a number and a table are both legal.
+	C.Create({ position = { x = 0, y = 0, z = 0 }, lookAt = 0 })
+	check('entity 0 is the local player and survives the door as the number it is',
+		sent().lookAt == 0)
+	check('a negative entity is refused as the entity it meant to be',
+		made({ position = { x = 0, y = 0, z = 0 }, lookAt = -1 }).error == 'invalid_entity_id')
+	check('a look-at point is refused by the look-at\'s own word',
+		made({ position = { x = 0, y = 0, z = 0 }, lookAt = { x = 0, y = 0 } }).error
+			== 'invalid_camera_look_at'
+		and made({ position = { x = 0, y = 0, z = 0 }, lookAt = 'up' }).error
+			== 'invalid_camera_look_at')
+
+	-- Rotation: two forms, told apart by w.
+	check('a quaternion is accepted whole',
+		made({ position = { x = 0, y = 0, z = 0 },
+			rotation = { x = 0, y = 0, z = 0, w = 1 } }).ok)
+	check('but three quarters of one is a typo, not a rotation',
+		made({ position = { x = 0, y = 0, z = 0 },
+			rotation = { x = 0, y = 0, w = 1 } }).error == 'invalid_camera_rotation')
+	check('Euler degrees take any subset and are not range-checked, because '
+		.. 'the engine wraps them',
+		made({ position = { x = 0, y = 0, z = 0 }, rotation = { yaw = 450 } }).ok)
+	check('but a NaN angle is refused rather than pointed nowhere',
+		made({ position = { x = 0, y = 0, z = 0 }, rotation = { yaw = 0 / 0 } }).error
+			== 'invalid_camera_rotation')
+	check('an empty rotation table is not a rotation',
+		made({ position = { x = 0, y = 0, z = 0 }, rotation = {} }).error
+			== 'invalid_camera_rotation')
+
+	local both = made({ position = { x = 0, y = 0, z = 0 }, lookAt = 0,
+		rotation = { yaw = 90 } })
+	check('a rotation and a lookAt in one definition are two aims, so the '
+		.. 'caller is made to pick rather than one winning silently',
+		both.error == 'invalid_camera_rotation'
+		and both.detail:find('two different aims', 1, true) ~= nil)
+
+	local typo = made({ position = { x = 0, y = 0, z = 0 }, lookat = 0 })
+	check('a misspelled field is named rather than silently ignored',
+		typo.error == 'invalid_camera_options' and typo.detail:find('lookat', 1, true) ~= nil)
+
+	-- Move: the table form, and the narrower field set.
+	check('Move patches a live camera', C.Move(3, { position = { x = 1, y = 2, z = 3 } }).ok)
+	check('and takes a fov with it, which the positional form cannot',
+		C.Move(3, { fov = 60 }).ok and lastCall().args[2].fov == 60)
+	check('an empty patch is refused by the platform\'s own word rather than '
+		.. 'spent on a native call',
+		C.Move(3, {}).error == 'empty_camera_transform')
+	check('and a field only a create has is refused there',
+		C.Move(3, { attachTo = 0 }).error == 'invalid_camera_options')
+
+	-- The id is a number here, unlike a marker's decimal string.
+	check('a camera id that was run through tostring is refused at the door',
+		C.Destroy('3').error == 'invalid_camera_id'
+		and C.Move(3.5, { fov = 60 }).error == 'invalid_camera_id'
+		and C.Destroy(0).error == 'invalid_camera_id')
+
+	check('Attach needs both arguments, so nobody reaches the no-argument '
+		.. 'call that restores the player\'s own camera by accident',
+		C.Attach(3).error == 'invalid_entity_id' and C.Attach(3, 0).ok)
+	check('and an offset, when given, is a finite point in the parent frame',
+		C.Attach(3, 0, { x = 0, y = -1, z = 1 }).ok
+		and C.Attach(3, 0, { x = 0 / 0, y = 0, z = 0 }).error == 'invalid_camera_offset')
+	check('DetachFrom takes an id', C.DetachFrom(3).ok)
+	check('Destroy takes an id', C.Destroy(3).ok)
+
+	install({ ['camera.create'] = function() return nil, 'camera_budget_exhausted' end })
+	local full = C.Create({ position = { x = 0, y = 0, z = 0 } })
+	check('the budget refusal is rewritten to say what the numbers are',
+		full.error == 'camera_budget_exhausted'
+		and full.detail:find('16', 1, true) ~= nil and full.detail:find('64', 1, true) ~= nil)
+end
+
+section('camera: the blend, at both ends')
+do
+	local C = Lib.Camera
+	install({
+		['camera.activate'] = function() return true end,
+		['camera.deactivate'] = function() return true end,
+	})
+
+	check('blendMs holds at 0 and 60000',
+		C.Take(1, { blendMs = 0 }).ok and C.Take(1, { blendMs = 60000 }).ok)
+	check('and is refused just outside either end, by the platform\'s word',
+		C.Take(1, { blendMs = -1 }).error == 'invalid_blend_ms'
+		and C.Take(1, { blendMs = 60001 }).error == 'invalid_blend_ms')
+	check('a numeric string is not a number, and neither is NaN or infinity',
+		C.Take(1, { blendMs = '600' }).error == 'invalid_blend_ms'
+		and C.Take(1, { blendMs = 0 / 0 }).error == 'invalid_blend_ms'
+		and C.Take(1, { blendMs = math.huge }).error == 'invalid_blend_ms')
+	check('and half a millisecond is not a whole number of them',
+		C.Take(1, { blendMs = 1.5 }).error == 'invalid_blend_ms')
+	check('the same bound guards the hand-back',
+		C.Release({ blendMs = 60000 }).ok
+		and C.Release({ blendMs = 60001 }).error == 'invalid_blend_ms')
+	check('and an option neither call has is refused by name',
+		C.Take(1, { blendms = 400 }).error == 'invalid_camera_options'
+		and C.Release({ holdMs = 400 }).error == 'invalid_camera_options')
+end
+
+section('camera: who has the view')
+do
+	local C = Lib.Camera
+
+	install({ ['resource.name'] = function() return 'open77_shop' end })
+	check('State answers free when nobody holds the view',
+		C.State({ held = false }) == 'free' and C.State({ holder = '' }) == 'free')
+	check('mine when the holder is us', C.State({ held = true, holder = 'open77_shop' }) == 'mine')
+	check('and theirs when it is somebody else',
+		C.State({ held = true, holder = 'open77_creator' }) == 'theirs')
+	check('and it decides on the NAME, so it is right under either reading of '
+		.. '`held` -- the two sources disagree about that field',
+		C.State({ held = false, holder = 'open77_creator' }) == 'theirs')
+	check('anything that is not a snapshot is not guessed at',
+		C.State(nil) == 'unknown' and C.State('open77_shop') == 'unknown')
+
+	install({ ['camera.cameras'] = function()
+		return { held = true, holder = 'open77_creator', phase = 'holding', cameras = {} }
+	end })
+	check('a build that will not say its own name answers the honestly vague '
+		.. '"held" rather than guessing whose it is',
+		C.State({ held = true, holder = 'open77_creator' }) == 'held')
+
+	local snap = C.Cameras()
+	check('Cameras annotates the snapshot with that state',
+		snap.ok and snap.value.state == 'held')
+	check('and leaves the platform\'s own fields alone, so a newer build\'s '
+		.. 'extra ones survive', snap.value.phase == 'holding')
+
+	local holder = C.Holder()
+	check('Holder answers the one question a camera_held_by refusal leaves you '
+		.. 'asking', holder.ok and holder.value == 'open77_creator')
+
+	install({ ['camera.cameras'] = function() return { held = false, cameras = {} } end })
+	local free = C.Holder()
+	check('and Ok(nil) when the view is free, which is an answer and not a '
+		.. 'failure', free.ok and free.value == nil)
+end
+
+section('camera: a refusal that names the holder')
+do
+	local C = Lib.Camera
+
+	install({
+		['camera.activate'] = function() return false, 'camera_held_by:open77_creator' end,
+		['camera.cameras'] = function() return { held = true, holder = 'open77_creator' } end,
+	})
+	local refused = C.Take(1)
+	check('the platform\'s own parameterised code survives as the code',
+		refused.error == 'camera_held_by:open77_creator')
+	check('and the holder is lifted out of it, onto the Result and into the detail',
+		refused.holder == 'open77_creator'
+		and refused.detail:find('open77_creator has the view', 1, true) ~= nil)
+	check('without spending a native call to learn what the code already said',
+		lastCall().path == 'camera.activate')
+
+	install({
+		['camera.activate'] = function() return false, 'camera_held' end,
+		['camera.cameras'] = function() return { held = true, holder = 'open77_creator' } end,
+	})
+	local bare = C.Take(1)
+	check('the bare refusal is worth one extra read, because "somebody has the '
+		.. 'view" is not actionable and a name is',
+		bare.error == 'camera_held' and bare.holder == 'open77_creator'
+		and lastCall().path == 'camera.cameras')
+
+	install({
+		['camera.activate'] = function() return false, 'camera_held' end,
+		['camera.cameras'] = function() return nil, 'camera_unavailable_on_this_host' end,
+	})
+	local quiet = C.Take(1)
+	check('and when the build will not say either, it says that rather than '
+		.. 'inventing a holder',
+		quiet.holder == nil and quiet.detail:find('would not say which', 1, true) ~= nil)
+
+	install({ ['camera.follow'] = function() return nil, 'camera_held_by:open77_admin' end })
+	check('follow is refused the same way, because it is not a new way to hold '
+		.. 'the view', C.Follow(0).holder == 'open77_admin')
+
+	-- The one refusal the engine cannot name for itself.
+	install({ ['camera.activate'] = function() return false, 'invalid_argument' end })
+	local far = C.Take(1)
+	check('activate\'s bare invalid_argument is rewritten into the streaming '
+		.. 'ceiling, which is the only thing left it can mean',
+		far.error == 'invalid_argument' and far.detail:find('250 m', 1, true) ~= nil
+		and far.detail:find('move the player', 1, true) ~= nil)
+end
+
+section('camera: the promise that comes second')
+do
+	local C = Lib.Camera
+
+	local blend = promise(true)
+	install({
+		['camera.activate'] = function() return true, blend end,
+		['camera.deactivate'] = function() return true, blend end,
+		['camera.follow'] = function() return 7, blend end,
+		['camera.unfollow'] = function() return true, blend end,
+	})
+
+	local took = C.Take(1, { blendMs = 600 })
+	check('the Result carries the native\'s FIRST return, untouched',
+		took.ok and took.value == true)
+	check('and the promise -- which Native.Call would have dropped -- rides '
+		.. 'along under blend', took.blend == blend)
+	check('Release carries one too', C.Release({ blendMs = 400 }).blend == blend)
+	local followed = C.Follow(0, { distance = 5.0 })
+	check('and Follow answers the camera id with the blend beside it',
+		followed.ok and followed.value == 7 and followed.blend == blend)
+	check('as does Unfollow', C.Unfollow().blend == blend)
+
+	install({ ['camera.activate'] = function() return true end })
+	local cut = C.Take(1)
+	check('a cut settles before the call returns and hands back no promise',
+		cut.ok and cut.blend == nil)
+	check('and awaiting what a cut gave you is Ok, so no call site needs an if',
+		C.Await(cut.blend).ok)
+
+	local landed = promise(true)
+	check('Await resolves when the blend lands', C.Await(landed).ok and landed.awaited)
+
+	local died = C.Await(promise(nil, 'player_died'))
+	check('a release rejects the promise rather than dropping it, so the '
+		.. 'coroutine that was going to tidy up wakes up',
+		not died.ok and died.error == 'player_died')
+	check('and the reason arrives as the sentence, not just the token',
+		died.detail == Lib.Camera.RELEASES.player_died)
+end
+
+section('camera: the release guarantee')
+do
+	local C = Lib.Camera
+	local handBack
+
+	local function host(activate, deactivate)
+		install({
+			['camera.activate'] = activate,
+			['camera.deactivate'] = deactivate or function()
+				handBack = promise(true)
+				return true, handBack
+			end,
+		})
+	end
+
+	-- 1. The ordinary path.
+	handBack = nil
+	host(function() return true, promise(true) end)
+	local ran = false
+	local shot = C.Shot(1, { blendMs = 600 }, function()
+		ran = true
+		return 'done'
+	end)
+	check('Shot runs the body while it holds the view and answers what the '
+		.. 'body answered', ran and shot.ok and shot.value == 'done')
+	check('and the view is handed back', lastCall().path == 'camera.deactivate')
+	check('and the hand-back blend is AWAITED, so when Shot returns the view '
+		.. 'is on the player\'s eyes and not halfway there',
+		handBack ~= nil and handBack.awaited and shot.released == true)
+	check('the hand-back defaults to the blend the take used, because a shot '
+		.. 'that eases in and cuts out is the thing a player notices',
+		lastCall().args[1].blendMs == 600)
+
+	-- 2. The path the platform's own rules do not cover.
+	handBack = nil
+	host(function() return true, promise(true) end)
+	local raised = C.Shot(1, { blendMs = 0 }, function() error('the UI blew up') end)
+	check('a body that RAISES still gives the view back -- the case a live '
+		.. 'resource is in, which no release rule covers',
+		lastCall().path == 'camera.deactivate' and raised.released == true)
+	check('and the raise is reported rather than swallowed or unwound',
+		not raised.ok and raised.error == 'shot_raised'
+		and raised.detail:find('the UI blew up', 1, true) ~= nil)
+
+	-- 3. Released underneath us before the shot was ever up.
+	handBack = nil
+	host(function() return true, promise(nil, 'camera_superseded') end)
+	local never = C.Shot(1, { blendMs = 600 }, function()
+		ran = 'body ran anyway'
+		return true
+	end)
+	check('a blend that never lands means the shot never happened, so the '
+		.. 'body does not run over a view somebody else now owns',
+		not never.ok and never.error == 'camera_superseded' and ran ~= 'body ran anyway')
+	check('and the view is still handed back on the way out',
+		lastCall().path == 'camera.deactivate')
+
+	-- 4. Something released it first. That is success, not failure.
+	host(function() return true, promise(true) end,
+		function() return false, 'camera_not_active' end)
+	local already = C.Shot(1, nil, function() return 1 end)
+	check('a hand-back refused with camera_not_active is the outcome we wanted: '
+		.. 'a release rule got there first and the view is already back',
+		already.ok and already.released == true)
+
+	-- 5. A hand-back refused for any other reason is NOT quietly a success.
+	host(function() return true, promise(true) end,
+		function() return false, 'camera_unavailable_on_this_host' end)
+	local stuck = C.Shot(1, nil, function() return 1 end)
+	check('but any other refusal is reported, because a view that did not come '
+		.. 'back is the whole thing this module is about',
+		stuck.ok and stuck.released == false)
+
+	-- 6. A take that was refused never claims to have released anything.
+	install({ ['camera.activate'] = function() return false, 'camera_unavailable' end })
+	local before = #recorded
+	local no = C.Shot(1, nil, function() return 1 end)
+	check('a refused take is passed straight back and nothing is handed back, '
+		.. 'because nothing was taken',
+		no.error == 'camera_unavailable' and no.released == nil and #recorded == before + 1)
+
+	-- The door on Shot itself.
+	host(function() return true, promise(true) end)
+	check('Shot(cam, fn) is the same call as Shot(cam, nil, fn)',
+		C.Shot(1, function() return 'short' end).value == 'short')
+	check('and something that is not a function is refused before the view is '
+		.. 'ever taken', C.Shot(1, nil, 'not a function').error == 'invalid_body')
+	check('as is an option Shot does not have',
+		C.Shot(1, { holdMs = 10 }, function() end).error == 'invalid_camera_options')
+	check('releaseMs overrides the take\'s blend when the caller wants a '
+		.. 'different one', (function()
+			C.Shot(1, { blendMs = 600, releaseMs = 120 }, function() end)
+			return lastCall().args[1].blendMs == 120
+		end)())
+end
+
+section('camera: shake and the ungated ray')
+do
+	local C = Lib.Camera
+	install({
+		['camera.shake'] = function() return true end,
+		['camera.stopShake'] = function() return true end,
+		['camera.unproject'] = function() return { origin = {}, direction = {} } end,
+	})
+
+	check('every documented preset is accepted', (function()
+		for _, preset in ipairs(C.SHAKES) do
+			if not C.Shake(1, preset).ok then return false end
+		end
+		return true
+	end)())
+	local unknown = C.Shake(1, 'wobble')
+	check('an unknown preset is refused here, one native call early, and the '
+		.. 'refusal lists the four that would have worked',
+		unknown.error == 'invalid_shake_preset'
+		and unknown.detail:find('earthquake', 1, true) ~= nil)
+	check('amplitude holds at 0 and 4', C.Shake(1, 'hand', 0).ok and C.Shake(1, 'hand', 4).ok)
+	check('and is refused just outside either end',
+		C.Shake(1, 'hand', -0.01).error == 'invalid_shake_argument'
+		and C.Shake(1, 'hand', 4.01).error == 'invalid_shake_argument')
+	check('a duration is whole milliseconds, not a numeric string',
+		C.Shake(1, 'hand', 1.0, '500').error == 'invalid_shake_argument')
+	C.Shake(nil, 'explosion', 2.0, 1000)
+	check('and omitting the id shakes whichever camera you hold',
+		lastCall().args[1] == nil and lastCall().args[2] == 'explosion')
+
+	check('StopShake takes an id', C.StopShake(1).ok)
+
+	check('the screen point holds at 0 and 1', C.Ray(0, 0).ok and C.Ray(1, 1).ok)
+	check('and is refused just outside either end, by the platform\'s word',
+		C.Ray(-0.01, 0.5).error == 'invalid_screen_point'
+		and C.Ray(0.5, 1.01).error == 'invalid_screen_point'
+		and C.Ray(0.5, 0 / 0).error == 'invalid_screen_point')
+end
+
+-- ── Screen ───────────────────────────────────────────────────────────────────
+section('screen: what the platform said')
+do
+	local S = Lib.Screen
+
+	check('the catalogue currently contains exactly one preset',
+		#S.PRESETS == 1 and S.PRESETS[1] == 'fade')
+	check('the documented bounds are written down',
+		S.MAX_FADE_MS == 10000 and S.MAX_HOLD_MS == 30000
+		and S.MIN_TIMEOUT_MS == 1000 and S.MAX_TIMEOUT_MS == 60000
+		and S.TIMEOUT_MARGIN_MS == 500 and S.ALPHA == 255)
+	check('and the defaults, which are for checking and never sent',
+		S.DEFAULTS.durationMs == 500 and S.DEFAULTS.holdMs == 250
+		and S.DEFAULTS.fadeInMs == 500)
+	check('the three phases nothing follows are the terminal set',
+		S.TERMINAL.finished and S.TERMINAL.cancelled and S.TERMINAL.failed
+		and S.TERMINAL.covered == nil)
+	check('and the reason that is ours rather than the engine\'s is explained, '
+		.. 'because the engine calls it completed',
+		S.REASONS.never_covered:find('without ever reaching black', 1, true) ~= nil)
+	check('Why turns a token into that sentence, and passes an unknown through',
+		S.Why('timeout') == S.REASONS.timeout
+		and S.Why('newer_reason'):find('newer_reason', 1, true) ~= nil)
+	check('the module states its permission for Lib.Manifest()',
+		S.NEEDS == 'screen.effects')
+
+	_G.Open77 = {}
+	check('on a build without the namespace the module says so',
+		S.FadeOut().error == 'native_not_found'
+		and S.Catalog().error == 'native_not_found')
+	check('and IsFaded fails to true, because a wrong false is what stacks two '
+		.. 'fades on one player', S.IsFaded() == true)
+end
+
+section('screen: the door')
+do
+	local S = Lib.Screen
+	install({
+		['screen.fadeOut'] = function() return '12' end,
+		['screen.fadeIn'] = function() return true end,
+		['screen.transition'] = function() return '13' end,
+	})
+	local function sent() return lastCall().args[#lastCall().args] end
+
+	check('durationMs holds at 0 and 10000',
+		S.FadeOut({ durationMs = 0 }).ok and S.FadeOut({ durationMs = 10000 }).ok)
+	check('and is refused just outside either end, under the platform\'s own '
+		.. 'parameterised code',
+		S.FadeOut({ durationMs = -1 }).error == 'invalid_screen_option:durationMs'
+		and S.FadeOut({ durationMs = 10001 }).error == 'invalid_screen_option:durationMs')
+	check('a numeric string is not a number, and neither is NaN or infinity',
+		S.FadeOut({ durationMs = '500' }).error == 'invalid_screen_option:durationMs'
+		and S.FadeOut({ durationMs = 0 / 0 }).error == 'invalid_screen_option:durationMs'
+		and S.FadeOut({ durationMs = math.huge }).error == 'invalid_screen_option:durationMs')
+	check('and durations are integer milliseconds, not fractions of one',
+		S.FadeOut({ durationMs = 500.5 }).error == 'invalid_screen_option:durationMs')
+
+	check('holdMs holds at 0 and 30000',
+		S.Transition('fade', { holdMs = 0, timeoutMs = 2000 }).ok
+		and S.Transition('fade', { holdMs = 30000, timeoutMs = 31600 }).ok)
+	check('and is refused just past its own end, which is not the fade bound',
+		S.Transition('fade', { holdMs = 30001 }).error == 'invalid_screen_option:holdMs')
+	check('fadeInMs holds at 0 and 10000 and is refused past it',
+		S.Transition('fade', { fadeInMs = 10000 }).ok
+		and S.Transition('fade', { fadeInMs = 10001 }).error
+			== 'invalid_screen_option:fadeInMs')
+
+	check('timeoutMs holds at 1000 and 60000',
+		S.FadeOut({ durationMs = 400, timeoutMs = 1000 }).ok
+		and S.FadeOut({ timeoutMs = 60000 }).ok)
+	check('and is refused just outside either end',
+		S.FadeOut({ timeoutMs = 999 }).error == 'invalid_screen_option:timeoutMs'
+		and S.FadeOut({ timeoutMs = 60001 }).error == 'invalid_screen_option:timeoutMs')
+
+	-- The cross-field rule, using the documented defaults for what was omitted.
+	local short = S.Transition('fade', { timeoutMs = 1249 })
+	check('a deadline that does not clear the sequence it bounds is refused '
+		.. 'with the platform\'s own word',
+		short.error == 'screen_timeout_too_short')
+	check('and the refusal states the sum, which is the one number the engine '
+		.. 'does not give you', short.detail:find('1250 ms', 1, true) ~= nil)
+	check('the margin is exactly 500 ms, at both sides of the line',
+		S.Transition('fade', { timeoutMs = 1750 }).ok
+		and S.Transition('fade', { timeoutMs = 1749 }).error == 'screen_timeout_too_short')
+	check('a fadeOut is checked against the outgoing fade alone, because the '
+		.. 'return it will get is not this call\'s to know',
+		S.FadeOut({ durationMs = 2000, timeoutMs = 2500 }).ok
+		and S.FadeOut({ durationMs = 2000, timeoutMs = 2499 }).error
+			== 'screen_timeout_too_short')
+
+	-- The option sets differ per call, and that is the point.
+	check('fadeIn takes a duration and nothing else, because a hold there is a '
+		.. 'hold nobody ever performs',
+		S.FadeIn('12', { durationMs = 400 }).ok
+		and S.FadeIn('12', { holdMs = 400 }).error == 'invalid_screen_option:holdMs')
+	local unknown = S.FadeOut({ duration = 400 })
+	check('an unknown option is named, not ignored',
+		unknown.error == 'invalid_screen_option:duration'
+		and unknown.detail:find('durationMs', 1, true) ~= nil)
+
+	-- Colour.
+	check('colour channels hold at 0 and 255',
+		S.FadeOut({ color = { r = 0, g = 0, b = 0 } }).ok
+		and S.FadeOut({ color = { r = 255, g = 255, b = 255 } }).ok)
+	check('and are refused just outside either end',
+		S.FadeOut({ color = { r = -1 } }).error == 'invalid_screen_color'
+		and S.FadeOut({ color = { g = 256 } }).error == 'invalid_screen_color')
+	check('alpha is not a range: 255 is the only value this API has',
+		S.FadeOut({ color = { r = 0, a = 255 } }).ok
+		and S.FadeOut({ color = { r = 0, a = 254 } }).error == 'invalid_screen_color')
+	S.FadeOut({ color = '#ff3b47' })
+	check('a hex string is converted to the bytes the native wants, as it is '
+		.. 'everywhere else in this library',
+		sent().color.r == 255 and sent().color.g == 59 and sent().color.b == 71)
+	check('and a malformed one is refused',
+		S.FadeOut({ color = '#f00' }).error == 'invalid_screen_color')
+	S.FadeOut({ color = { r = 12 } })
+	check('an omitted channel is left to the engine rather than filled in here',
+		sent().color.g == nil and sent().color.a == nil)
+
+	-- Presets.
+	check('the one preset in the catalogue is accepted', S.Transition('fade').ok)
+	check('a preset the platform knows but has not landed is forwarded, so the '
+		.. 'caller reads "not yet" and not "misspelled"',
+		S.Transition('glitch').ok and lastCall().args[1] == 'glitch')
+	local nonsense = S.Transition('sparkle')
+	check('while a name nobody has is refused here, naming the one that works',
+		nonsense.error == 'unsupported_screen_preset'
+		and nonsense.detail:find('fade', 1, true) ~= nil)
+
+	-- Ids are opaque strings and are never interpreted.
+	check('an id that was run through tonumber is refused at the door',
+		S.FadeIn(12).error == 'invalid_transition_id'
+		and S.Cancel(nil).error == 'invalid_transition_id'
+		and S.State('').error == 'invalid_transition_id')
+end
+
+section('screen: the slot is single and shared')
+do
+	local S = Lib.Screen
+
+	install({
+		['screen.fadeOut'] = function() return nil, 'screen_busy' end,
+		['screen.transition'] = function() return nil, 'screen_busy' end,
+	})
+	local taken = S.FadeOut({ durationMs = 400 })
+	check('a second request answers the platform\'s own screen_busy',
+		taken.error == 'screen_busy')
+	check('and the refusal says the slot is shared with the server relay, '
+		.. 'which is the cause a client resource cannot see',
+		taken.detail:find('server relay', 1, true) ~= nil
+		and taken.detail:find('isFaded', 1, true) ~= nil)
+	check('transition is refused the same way, from the same slot',
+		S.Transition('fade').error == 'screen_busy')
+
+	install({ ['screen.fadeOut'] = function() return nil, 'native_screen_busy' end })
+	local vanilla = S.FadeOut()
+	check('a fade the GAME owns is a different answer and a different remedy',
+		vanilla.error == 'native_screen_busy'
+		and vanilla.detail:find('will not clear it', 1, true) ~= nil)
+end
+
+section('screen: the promise that comes second')
+do
+	local S = Lib.Screen
+
+	local covered, restored, finished = promise({ black = true }), promise(true), promise(true)
+	install({
+		['screen.fadeOut'] = function() return '12', covered end,
+		['screen.fadeIn'] = function() return true, restored end,
+		['screen.transition'] = function() return '13', finished end,
+	})
+
+	local out = S.FadeOut({ durationMs = 400 })
+	check('the Result carries the opaque id, exactly as the native gave it',
+		out.ok and out.value == '12')
+	check('and the promise -- which Native.Call would have dropped -- rides '
+		.. 'along, named for what it settles on', out.covered == covered)
+	check('fadeIn keeps its own true and names its promise for the image '
+		.. 'coming back',
+		S.FadeIn('12').value == true and S.FadeIn('12').restored == restored)
+	check('and a transition names its promise for the end of the sequence, '
+		.. 'which is not when the screen turns black',
+		S.Transition('fade').finished == finished)
+
+	local black = S.Await(out.covered)
+	check('Await resolves with the state table the event carries',
+		black.ok and black.value.black == true and covered.awaited)
+	check('and a nil promise is Ok, so no call site needs an if',
+		S.Await(nil).ok)
+
+	local ended = S.Await(promise(nil, 'never_covered'))
+	check('a transition that ended some other way rejects rather than parking '
+		.. 'the coroutine that was going to call fadeIn',
+		not ended.ok and ended.error == 'never_covered')
+	check('and the reason arrives as the sentence, which for this one is the '
+		.. 'only way to read it', ended.detail == Lib.Screen.REASONS.never_covered)
+end
+
+section('screen: the reads, owned and unowned')
+do
+	local S = Lib.Screen
+
+	install({ ['screen.isFaded'] = function() return true end })
+	check('IsFaded answers the screen, whoever covered it', S.IsFaded() == true)
+	install({ ['screen.isFaded'] = function() return false end })
+	check('and false is an ANSWER -- the screen is clear -- which is why it '
+		.. 'cannot go through Native.Call', S.IsFaded() == false)
+	install({ ['screen.isFaded'] = function() return nil, 'screen_unavailable' end })
+	check('a guarded backend that will not say answers true, not false: a '
+		.. 'wrong false is exactly what stacks two fades', S.IsFaded() == true)
+	install({ ['screen.isFaded'] = function() error('boom') end })
+	check('and so does a read that raises', S.IsFaded() == true)
+
+	install({ ['screen.nativeState'] = function()
+		return { faded = false, fading = true, remainingMs = 120 }
+	end })
+	local native = S.NativeState()
+	check('NativeState keeps the distinction IsFaded gives up, so a caller can '
+		.. 'wait for an incoming fade instead of racing it',
+		native.ok and native.value.fading == true and native.value.faded == false)
+
+	check('Over reads the terminal phases',
+		S.Over({ phase = 'finished' }) and S.Over({ phase = 'cancelled' })
+		and S.Over({ phase = 'failed' }))
+	check('and the live ones are not over',
+		not S.Over({ phase = 'fading_out' }) and not S.Over({ phase = 'covered' })
+		and not S.Over({ phase = 'fading_in' }))
+	check('a phase from a newer build reads as NOT over, which keeps the id '
+		.. 'and risks one redundant fadeIn -- the other direction risks a '
+		.. 'screen nobody ever restores',
+		not S.Over({ phase = 'something_new' }) and not S.Over(nil))
+
+	install({ ['screen.state'] = function()
+		return { id = '12', phase = 'covered', black = true, elapsedMs = 650 }
+	end })
+	local mine = S.State('12')
+	check('State annotates the owner-scoped snapshot with that answer',
+		mine.ok and mine.value.over == false)
+	check('and leaves the platform\'s own fields alone',
+		mine.value.elapsedMs == 650 and mine.value.black == true)
+
+	install({ ['screen.catalog'] = function()
+		return { fade = { available = true, backend = 'native_quest_fade' } }
+	end })
+	local catalogue = S.Catalog()
+	check('Catalog asks the build rather than answering the static list',
+		catalogue.ok and catalogue.value.fade.available == true)
+end
+
+section('screen: the image comes back')
+do
+	local S = Lib.Screen
+	local restored
+
+	local function host(fadeOut, fadeIn)
+		install({
+			['screen.fadeOut'] = fadeOut,
+			['screen.fadeIn'] = fadeIn or function()
+				restored = promise(true)
+				return true, restored
+			end,
+		})
+	end
+
+	-- 1. The ordinary path.
+	restored = nil
+	host(function() return '12', promise({ black = true }) end)
+	local ran = false
+	local hidden = S.Black({ durationMs = 400, fadeInMs = 250 }, function()
+		ran = true
+		return 'moved'
+	end)
+	check('Black runs the body once the screen is actually black and answers '
+		.. 'what the body answered', ran and hidden.ok and hidden.value == 'moved')
+	check('and the image is handed back', lastCall().path == 'screen.fadeIn')
+	check('with fadeInMs lifted out of the fadeOut options, where it is not a '
+		.. 'field, and spent on the return', lastCall().args[2].durationMs == 250)
+	check('and the return is AWAITED, so when Black returns the image is back',
+		restored ~= nil and restored.awaited and hidden.restored == true)
+	check('the fadeIn is given the id the fadeOut answered',
+		lastCall().args[1] == '12')
+
+	-- 2. The path the safety deadline would otherwise have to cover.
+	restored = nil
+	host(function() return '12', promise({ black = true }) end)
+	local raised = S.Black(nil, function() error('the teleport threw') end)
+	check('a body that RAISES still gives the image back, rather than leaving '
+		.. 'the player staring at black until the deadline expires',
+		lastCall().path == 'screen.fadeIn' and raised.restored == true)
+	check('and the raise is reported rather than swallowed',
+		not raised.ok and raised.error == 'screen_body_raised'
+		and raised.detail:find('the teleport threw', 1, true) ~= nil)
+
+	-- 3. It never went black, so the body must not run in plain view.
+	host(function() return '12', promise(nil, 'native_interrupted') end)
+	local never = S.Black(nil, function()
+		ran = 'body ran in plain view'
+		return true
+	end)
+	check('a fade that never reaches black does not run a body written to '
+		.. 'happen unseen',
+		not never.ok and never.error == 'native_interrupted'
+		and ran ~= 'body ran in plain view')
+	check('and it still tries to restore on the way out',
+		lastCall().path == 'screen.fadeIn')
+
+	-- 4. Already over. That is the outcome we wanted.
+	host(function() return '12', promise({ black = true }) end,
+		function() return false, 'transition_not_active' end)
+	local over = S.Black(nil, function() return 1 end)
+	check('a return refused because the transition is already over is a '
+		.. 'success: the image is back either way',
+		over.ok and over.restored == true)
+
+	-- 5. Any other refusal is not quietly a success.
+	host(function() return '12', promise({ black = true }) end,
+		function() return false, 'not_owner' end)
+	local wrong = S.Black(nil, function() return 1 end)
+	check('but a return refused for any other reason is reported',
+		wrong.ok and wrong.restored == false)
+
+	-- 6. Nothing was covered, so nothing is restored.
+	install({ ['screen.fadeOut'] = function() return nil, 'screen_busy' end })
+	local before = #recorded
+	local busy = S.Black(nil, function() return 1 end)
+	check('a refused fade is passed straight back and nothing is restored, '
+		.. 'because nothing was covered',
+		busy.error == 'screen_busy' and busy.restored == nil and #recorded == before + 1)
+
+	host(function() return '12', promise({ black = true }) end)
+	check('Black(fn) is the same call as Black(nil, fn)',
+		S.Black(function() return 'short' end).value == 'short')
+	check('and something that is not a function is refused before the screen '
+		.. 'is ever covered', S.Black(nil, 'not a function').error == 'invalid_body')
 end
 
 -- ── Timer ────────────────────────────────────────────────────────────────────
