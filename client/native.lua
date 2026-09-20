@@ -37,7 +37,20 @@ local Native = {}
 -- @param path string e.g. 'hud.notify'
 -- @return function|nil, string|nil
 function Native.Reach(path)
-	local root = rawget(_G, 'Open77')
+	-- AN ORDINARY GLOBAL READ, and the word `rawget` being absent here is the
+	-- whole point. This was `rawget(_G, 'Open77')`, which is wrong twice over:
+	-- `rawget` skips a metatable, so a host exposing the namespace through an
+	-- `__index` accessor answers nil; and `_G` is not necessarily the chunk's
+	-- `_ENV`, so a host that hands a resource its own environment answers nil
+	-- again. Either way every wrapper in this library silently takes its
+	-- absent-native path and a consumer's feature just stops, with no refusal
+	-- anybody can see.
+	--
+	-- It bought nothing. Reading a global that is not there yields nil in Lua;
+	-- it never raises, which is the only thing `rawget` could have been guarding
+	-- against. A plain read goes through `_ENV` and is correct under every
+	-- arrangement a host can choose.
+	local root = Open77
 	if type(root) ~= 'table' then return nil, 'open77_unavailable' end
 
 	local held = root
