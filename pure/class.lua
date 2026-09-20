@@ -14,6 +14,18 @@
 --   local Circle = Lib.Class('Circle', Zone)
 --   local here = Circle(centre, 15)
 --
+-- UNVERIFIED ON THE CLIENT, and nothing here should be relied on until it is.
+-- `getmetatable` is PROVEN ABSENT from the Open77 client sandbox -- it was
+-- measured, from a raise on the live server, and `pure/validate.lua` carries the
+-- write-up. `Holds` below calls it, and this module is built on `setmetatable`,
+-- whose presence has NOT been established either way: the catalogue does not
+-- list base Lua functions, so its silence is not evidence. Nothing in
+-- `opx_infinity` imports `Class`, which is the only reason this is a note rather
+-- than a defect. Before a consumer does, prove `setmetatable` on the client --
+-- one line in a client script that logs `type(setmetatable)` -- and then either
+-- fix `Holds` the way `Validate.Table` was fixed, or refuse at load with a
+-- sentence, rather than letting a caller find out through an unwound coroutine.
+--
 -- THIS IS THE ONE THING IN THE LIBRARY THAT ONLY WORKS THROUGH `require`, and it
 -- is worth saying plainly because it decides where a consumer can use it. A
 -- class is a metatable, and a metatable does not survive an export: arguments

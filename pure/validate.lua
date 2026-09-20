@@ -22,6 +22,30 @@
 -- it through to become a table index that is never equal to itself. Every
 -- comparison below is written so that NaN fails it.
 
+-- `getmetatable` IS NOT IN THE OPEN77 CLIENT SANDBOX, and this line is what one
+-- absent base global cost. `Validate.Table` called it, `Players.Nearby` calls
+-- `Validate.Table`, and the name-tag pass calls `Players.Nearby` -- so every
+-- pass raised `attempt to call a nil value (global 'getmetatable')`, the raise
+-- unwound the scheduler job, and name tags stopped for the session. The wardrobe
+-- died the same way and worse: its retry runs inside a `CreateThread`, and a
+-- raise there unwinds the coroutine with NO error anywhere, which is why a
+-- created character waited five minutes for a fitting room while the journal
+-- said nothing at all. Two features, one missing global.
+--
+-- CAPTURED AT LOAD, which the rest of this library is forbidden from doing --
+-- see the header of `client/native.lua`. The ban is about `Open77.*`, which does
+-- not exist yet when an early module is imported and appears later. A BASE
+-- global is the opposite: it is in the chunk's `_ENV` when the chunk loads or it
+-- is never there at all, so reading it once is both correct and free. Reading an
+-- absent global yields nil rather than raising, so this is safe on every host.
+--
+-- Absent, the check DEGRADES rather than refusing everything. Its purpose is
+-- defensive -- "data from outside is plain, so a table carrying a metatable did
+-- not come from outside" -- and on a host that cannot answer the question, the
+-- honest behaviour is to stop asking it, not to reject every table and take the
+-- caller's feature down with it. That is exactly the failure being fixed here.
+local getmeta = getmetatable
+
 local Validate = {}
 
 --- A finite number within an inclusive range, or nil.
@@ -123,7 +147,7 @@ end
 -- @return table|nil
 function Validate.Table(value, limit)
 	if type(value) ~= 'table' then return nil end
-	if getmetatable(value) ~= nil then return nil end
+	if getmeta ~= nil and getmeta(value) ~= nil then return nil end
 	if limit == nil then return value end
 
 	local count = 0
