@@ -55,7 +55,7 @@ local Lib = {}
 --- Semantic: a new module or function is a minor, a changed answer is a major.
 --- A consumer pinning behaviour compares this and not the resource's manifest
 --- version, which an operator can edit.
-Lib.VERSION = '0.3.0'
+Lib.VERSION = '0.4.0'
 
 -- ── Pure: no natives, no permissions, no host ────────────────────────────────
 Lib.Result = require('@opx_lib/pure.result')
@@ -86,6 +86,8 @@ Lib.World = require('@opx_lib/client.world')
 Lib.Players = require('@opx_lib/client.players')
 Lib.Blip = require('@opx_lib/client.blip')
 Lib.Store = require('@opx_lib/client.store')
+Lib.Camera = require('@opx_lib/client.camera')
+Lib.Screen = require('@opx_lib/client.screen')
 
 --- Module name -> the manifest permission it needs, read off each module's own
 --- `NEEDS`. Derived, never written out by hand: a list kept in two places is a
